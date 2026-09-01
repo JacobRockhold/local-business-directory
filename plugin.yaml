@@ -1,0 +1,62 @@
+apiVersion: businesshub/v1
+kind: Plugin
+metadata:
+  id: com.businesshub.local-businesses
+  name: Local Business Directory
+  version: 0.1.1
+  publisher: local-owner
+  description: Discovers local businesses in broad geographic sweeps, deduplicates them, and provides a shared directory to approved FileForge applications.
+compatibility:
+  hub: ">=0.1.0 <1.0.0"
+  pluginApi: 1
+  uiApi: 1
+image:
+  reference: local/com-businesshub-local-businesses@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  platforms: [linux/amd64, linux/arm64]
+runtime:
+  internalPort: 8080
+  health:
+    live: /_hub/health/live
+    ready: /_hub/health/ready
+  commands:
+    migrate: [/plugin, migrate]
+    export: [/plugin, export]
+    import: [/plugin, import]
+ui:
+  entrypoint: /ui/plugin-ui.js
+  navigation:
+    label: Local Businesses
+    icon: map-pin
+    order: 200
+database:
+  required: true
+capabilities:
+  provides:
+    - id: com.businesshub.local-businesses.directory.v1
+      openapi: schemas/directory.v1.openapi.yaml
+  requires: []
+events:
+  publishes:
+    - type: com.businesshub.local-businesses.discovery-completed.v1
+      schema: schemas/discovery-completed.v1.schema.json
+  subscribes: []
+permissions:
+  declares:
+    - id: com.businesshub.local-businesses.view
+      description: View and search the local business directory.
+    - id: com.businesshub.local-businesses.manage
+      description: Run bulk discovery sweeps and change data-source settings.
+    - id: com.businesshub.local-businesses.export
+      description: Export business records for approved operational use.
+  requests: []
+network:
+  internet:
+    requested: true
+    reasons:
+      - Query an administrator-selected OpenStreetMap Overpass-compatible endpoint for broad local business discovery.
+resources:
+  memoryMiB: 256
+  cpuUnits: 500
+  storageMiB: 2048
+data:
+  exportFormatVersion: 1

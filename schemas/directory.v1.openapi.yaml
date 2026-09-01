@@ -1,0 +1,183 @@
+openapi: 3.1.0
+info:
+  title: Local Business Directory capability
+  version: 1.0.0
+  description: Search and backfill the normalized, plugin-owned local business directory through the FileForge bridge.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /_hub/capabilities/com.businesshub.local-businesses.directory.v1
+security:
+  - hubServiceToken: []
+paths:
+  /search:
+    post:
+      operationId: searchBusinesses
+      summary: Search current business records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Matching business records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [businesses, total]
+                properties:
+                  businesses:
+                    type: array
+                    items: { $ref: "#/components/schemas/Business" }
+                  total: { type: integer, minimum: 0 }
+                  nextCursor: { type: string }
+        "422":
+          description: Invalid search or cursor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /get:
+    post:
+      operationId: getBusiness
+      summary: Get one current business record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id]
+              properties:
+                id: { type: string, example: "osm:node:123456" }
+      responses:
+        "200":
+          description: Current business record
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [business]
+                properties:
+                  business: { $ref: "#/components/schemas/Business" }
+        "404": { description: Business not found }
+        "422":
+          description: Invalid business identifier
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /backfill:
+    post:
+      operationId: backfillBusinesses
+      summary: Read a stable, paged snapshot for a downstream projection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                cursor: { type: string }
+                limit: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+      responses:
+        "200":
+          description: FileForge backfill page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackfillPage"
+        "422":
+          description: Invalid backfill cursor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+components:
+  securitySchemes:
+    hubServiceToken:
+      type: http
+      scheme: bearer
+      description: FileForge service identity enforced by the Hub bridge.
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        query: { type: string, maxLength: 200 }
+        categories:
+          type: array
+          maxItems: 50
+          items: { type: string, maxLength: 120 }
+        city: { type: string, maxLength: 120 }
+        region: { type: string, maxLength: 120 }
+        country: { type: string, maxLength: 120 }
+        limit: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+        cursor: { type: string }
+    Business:
+      type: object
+      additionalProperties: false
+      required: [id, source, sourceType, sourceId, sourceUrl, name, categories, primaryCategory, latitude, longitude, tags, version, firstSeenAt, lastSeenAt, updatedAt, license]
+      properties:
+        id: { type: string }
+        source: { const: openstreetmap }
+        sourceType: { enum: [node, way, relation] }
+        sourceId: { type: string }
+        sourceUrl: { type: string, format: uri }
+        name: { type: string }
+        categories: { type: array, items: { type: string } }
+        primaryCategory: { type: string }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        street: { type: string }
+        city: { type: string }
+        region: { type: string }
+        postalCode: { type: string }
+        country: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        website: { type: string }
+        openingHours: { type: string }
+        tags: { type: object, additionalProperties: { type: string } }
+        version: { type: integer, minimum: 1 }
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        discoveryJobId: { type: string }
+        license: { type: string }
+    BackfillRecord:
+      type: object
+      additionalProperties: false
+      required: [id, version, updatedAt, deleted, data]
+      properties:
+        id: { type: string }
+        version: { type: string }
+        updatedAt: { type: string, format: date-time }
+        deleted: { const: false }
+        data: { $ref: "#/components/schemas/Business" }
+    BackfillPage:
+      type: object
+      additionalProperties: false
+      required: [capability, snapshotTime, records, complete]
+      properties:
+        capability: { const: com.businesshub.local-businesses.directory.v1 }
+        snapshotTime: { type: string, format: date-time }
+        records:
+          type: array
+          maxItems: 1000
+          items: { $ref: "#/components/schemas/BackfillRecord" }
+        nextCursor: { type: string }
+        complete: { type: boolean }
