@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -40,12 +41,11 @@ func isolatedTestDatabase(t *testing.T) (string, *pgxpool.Pool) {
 		_, _ = base.Exec(context.Background(), "DROP SCHEMA "+identifier+" CASCADE")
 		base.Close()
 	})
-	config, err := pgxpool.ParseConfig(baseURL)
-	if err != nil {
-		t.Fatal(err)
+	separator := "?"
+	if strings.Contains(baseURL, "?") {
+		separator = "&"
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
-	scopedURL := config.ConnString()
+	scopedURL := baseURL + separator + "search_path=" + url.QueryEscape(schema)
 	if err := migrateDatabase(ctx, scopedURL); err != nil {
 		t.Fatal(err)
 	}
