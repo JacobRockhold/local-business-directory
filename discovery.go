@@ -53,6 +53,18 @@ type OverpassClient struct {
 	http *http.Client
 }
 
+type providerError struct {
+	code string
+	err  error
+}
+
+func (failure *providerError) Error() string { return failure.err.Error() }
+func (failure *providerError) Unwrap() error { return failure.err }
+
+func asProviderError(code string, err error) error {
+	return &providerError{code: code, err: err}
+}
+
 func NewOverpassClient() *OverpassClient {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -149,20 +161,24 @@ func (client *OverpassClient) Fetch(ctx context.Context, endpoint string, area A
 		}
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
 		request.Header.Set("Accept", "application/json")
-		request.Header.Set("User-Agent", "FileForge-Local-Business-Directory/0.1 (+https://github.com/JacobRockhold/business-hub)")
+		request.Header.Set("User-Agent", "FileForge-Local-Business-Directory/0.2 (+https://github.com/JacobRockhold/local-business-directory)")
 		response, err := client.http.Do(request)
 		if err != nil {
-			lastErr = err
+			lastErr = asProviderError("provider_unavailable", err)
 			continue
 		}
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, 96<<20))
 		response.Body.Close()
 		if readErr != nil {
-			lastErr = readErr
+			lastErr = asProviderError("provider_unavailable", readErr)
 			continue
 		}
 		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
-			lastErr = fmt.Errorf("Overpass returned %s", response.Status)
+			code := "provider_unavailable"
+			if response.StatusCode == http.StatusTooManyRequests {
+				code = "provider_rate_limited"
+			}
+			lastErr = asProviderError(code, fmt.Errorf("Overpass returned %s", response.Status))
 			if retryAfter, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr == nil && retryAfter > 0 {
 				select {
 				case <-ctx.Done():
@@ -173,13 +189,16 @@ func (client *OverpassClient) Fetch(ctx context.Context, endpoint string, area A
 			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			return nil, fmt.Errorf("Overpass returned %s: %s", response.Status, strings.TrimSpace(string(body[:min(len(body), 500)])))
+			return nil, asProviderError("provider_invalid_response", fmt.Errorf("Overpass returned %s", response.Status))
 		}
 		var payload overpassResponse
 		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, fmt.Errorf("decode Overpass response: %w", err)
+			return nil, asProviderError("provider_invalid_response", fmt.Errorf("decode Overpass response: %w", err))
 		}
 		return transformElements(payload.Elements, group), nil
+	}
+	if lastErr == nil {
+		lastErr = asProviderError("provider_unavailable", errors.New("Overpass request failed"))
 	}
 	return nil, fmt.Errorf("Overpass request failed after retries: %w", lastErr)
 }
@@ -329,7 +348,7 @@ func (worker *DiscoveryWorker) execute(ctx context.Context, job DiscoveryJob) {
 			}
 			configuration, err := settings(ctx, worker.pool)
 			if err != nil {
-				worker.fail(ctx, job.ID, err)
+				worker.fail(ctx, job.ID, "internal_error", err)
 				return
 			}
 			if step > 1 {
@@ -341,40 +360,72 @@ func (worker *DiscoveryWorker) execute(ctx context.Context, job DiscoveryJob) {
 			}
 			businesses, err := worker.overpass.Fetch(ctx, configuration.OverpassEndpoint, area, group)
 			if err != nil {
-				worker.fail(ctx, job.ID, fmt.Errorf("%s / %s: %w", area.Label, group, err))
+				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+					return
+				}
+				worker.fail(ctx, job.ID, discoveryErrorCode(err), fmt.Errorf("%s / %s: %w", area.Label, group, err))
 				return
 			}
 			created, updated, err := upsertBusinesses(ctx, worker.pool, job.ID, businesses)
 			if err != nil {
-				worker.fail(ctx, job.ID, err)
+				worker.fail(ctx, job.ID, "internal_error", err)
 				return
 			}
 			if err := updateJobStep(ctx, worker.pool, job.ID, len(businesses), created, updated); err != nil {
-				worker.fail(ctx, job.ID, err)
+				worker.fail(ctx, job.ID, "internal_error", err)
 				return
 			}
 		}
 	}
-	if err := finishJob(ctx, worker.pool, job.ID, "completed", ""); err != nil {
+	if err := finishJob(ctx, worker.pool, job.ID, "completed", "", ""); err != nil {
 		log.Printf("complete discovery job %s: %v", job.ID, err)
 		return
 	}
 	completed, err := getJob(ctx, worker.pool, job.ID)
 	if err == nil {
+		logJobCompletion(completed)
 		if err := worker.publishCompleted(ctx, completed); err != nil {
 			log.Printf("publish discovery completion for %s: %v", job.ID, err)
 		}
 	}
 }
 
-func (worker *DiscoveryWorker) fail(ctx context.Context, jobID string, err error) {
+func (worker *DiscoveryWorker) fail(ctx context.Context, jobID, errorCode string, err error) {
 	message := err.Error()
 	if len(message) > 1000 {
 		message = message[:1000]
 	}
-	if finishErr := finishJob(ctx, worker.pool, jobID, "failed", message); finishErr != nil {
-		log.Printf("fail discovery job %s: %v (original: %v)", jobID, finishErr, err)
+	if finishErr := finishJob(ctx, worker.pool, jobID, "failed", errorCode, message); finishErr != nil {
+		log.Printf("discovery job=%q status=%q duration_ms=0", jobID, "internal_error")
+		return
 	}
+	if failed, getErr := getJob(ctx, worker.pool, jobID); getErr == nil {
+		logJobCompletion(failed)
+	}
+}
+
+func discoveryErrorCode(err error) string {
+	var providerFailure *providerError
+	if errors.As(err, &providerFailure) {
+		return providerFailure.code
+	}
+	if errors.Is(err, context.Canceled) {
+		return "discovery_canceled"
+	}
+	return "internal_error"
+}
+
+func logJobCompletion(job DiscoveryJob) {
+	started := job.CreatedAt
+	if job.StartedAt != nil {
+		started = *job.StartedAt
+	}
+	ended := time.Now().UTC()
+	if job.CompletedAt != nil {
+		ended = *job.CompletedAt
+	}
+	duration := ended.Sub(started)
+	log.Printf("discovery caller=%q request=%q job=%q records_seen=%d records_created=%d records_updated=%d status=%q duration_ms=%d", job.RequestedByPlugin, job.RequestID, job.ID, job.RecordsSeen, job.RecordsCreated, job.RecordsUpdated, job.Status, duration.Milliseconds())
 }
 
 func (worker *DiscoveryWorker) publishCompleted(ctx context.Context, job DiscoveryJob) error {
@@ -393,7 +444,7 @@ func (worker *DiscoveryWorker) publishCompleted(ctx context.Context, job Discove
 		"time": completedAt, "datacontenttype": "application/json",
 		"dataschema":    "urn:businesshub:schema:com.businesshub.local-businesses.discovery-completed.v1",
 		"correlationid": job.ID,
-		"data":          map[string]any{"jobId": job.ID, "name": job.Name, "areaCount": len(job.Areas), "groups": job.Groups, "recordsSeen": job.RecordsSeen, "recordsCreated": job.RecordsCreated, "recordsUpdated": job.RecordsUpdated, "completedAt": completedAt},
+		"data":          completionEventData(job, completedAt),
 	}
 	body, _ := json.Marshal(envelope)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, eventURL, strings.NewReader(string(body)))
@@ -412,4 +463,13 @@ func (worker *DiscoveryWorker) publishCompleted(ctx context.Context, job Discove
 		return fmt.Errorf("event gateway returned %s: %s", response.Status, strings.TrimSpace(string(contents)))
 	}
 	return nil
+}
+
+func completionEventData(job DiscoveryJob, completedAt time.Time) map[string]any {
+	data := map[string]any{"jobId": job.ID, "name": job.Name, "areaCount": len(job.Areas), "groups": job.Groups, "recordsSeen": job.RecordsSeen, "recordsCreated": job.RecordsCreated, "recordsUpdated": job.RecordsUpdated, "completedAt": completedAt}
+	if job.RequestID != "" && job.RequestedByPlugin != "" {
+		data["requestId"] = job.RequestID
+		data["requestedByPlugin"] = job.RequestedByPlugin
+	}
+	return data
 }

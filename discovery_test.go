@@ -58,6 +58,50 @@ func TestValidateGroupsDefaultsAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestValidateAutomatedDiscoveryRequest(t *testing.T) {
+	areas := make([]Area, 7)
+	for index := range areas {
+		areas[index] = Area{Label: "Territory", Latitude: 38.7628, Longitude: -93.7361, RadiusMeters: 25000}
+	}
+	request := DiscoveryRequestInput{RequestID: "disc_01JCRM_AUTOMATIC_WEEKLY_20260907", Name: "CRM weekly discovery", Areas: areas, Groups: []string{"shop", "craft", "office"}}
+	groups, err := validateAutomatedDiscoveryRequest(&request)
+	if err != nil || len(groups) != 3 || len(request.Areas)*len(groups) != 21 {
+		t.Fatalf("expected a valid seven-area request, groups=%v err=%v", groups, err)
+	}
+
+	invalid := []DiscoveryRequestInput{
+		{RequestID: request.RequestID, Name: request.Name, Areas: []Area{{Label: "Bad coordinates", Latitude: 91, Longitude: 0, RadiusMeters: 250}}, Groups: []string{"shop"}},
+		{RequestID: request.RequestID, Name: request.Name, Areas: []Area{{Label: "Bad radius", Latitude: 0, Longitude: 0, RadiusMeters: 249}}, Groups: []string{"shop"}},
+		{RequestID: request.RequestID, Name: request.Name, Areas: []Area{{Label: "Bad group", Latitude: 0, Longitude: 0, RadiusMeters: 250}}, Groups: []string{"unknown"}},
+	}
+	for index := range invalid {
+		if _, err := validateAutomatedDiscoveryRequest(&invalid[index]); err == nil {
+			t.Fatalf("expected invalid automated discovery request %d to fail", index)
+		}
+	}
+
+	fiftyAreas := make([]Area, 50)
+	for index := range fiftyAreas {
+		fiftyAreas[index] = Area{Label: "Territory", Latitude: 0, Longitude: 0, RadiusMeters: 250}
+	}
+	tooManySteps := DiscoveryRequestInput{RequestID: request.RequestID, Name: request.Name, Areas: fiftyAreas, Groups: []string{"shop", "craft", "office", "amenity", "tourism", "healthcare", "leisure", "shop"}}
+	if _, err := validateAutomatedDiscoveryRequest(&tooManySteps); err == nil || !strings.Contains(err.Error(), "350") {
+		t.Fatalf("expected excessive step count to fail, received %v", err)
+	}
+}
+
+func TestCompletionEventCorrelationFields(t *testing.T) {
+	completedAt := time.Now().UTC()
+	automated := completionEventData(DiscoveryJob{ID: "job_automatic_example", RequestID: "disc_01JCRM_AUTOMATIC_WEEKLY_20260907", RequestedByPlugin: "com.businesshub.crm", Name: "CRM", Areas: []Area{{}}, Groups: []string{"shop"}}, completedAt)
+	if automated["requestId"] == nil || automated["requestedByPlugin"] != "com.businesshub.crm" {
+		t.Fatalf("automated event is missing correlation fields: %#v", automated)
+	}
+	manual := completionEventData(DiscoveryJob{ID: "job_manual_example", Name: "Manual", Areas: []Area{{}}, Groups: []string{"shop"}}, completedAt)
+	if _, exists := manual["requestId"]; exists {
+		t.Fatalf("manual event unexpectedly contains requestId: %#v", manual)
+	}
+}
+
 func TestOverpassLive(t *testing.T) {
 	if os.Getenv("OVERPASS_INTEGRATION") != "1" {
 		t.Skip("set OVERPASS_INTEGRATION=1 to run the courteous one-request source check")

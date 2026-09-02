@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Local Business Directory capability
-  version: 1.0.0
-  description: Search and backfill the normalized, plugin-owned local business directory through the FileForge bridge.
+  version: 1.1.0
+  description: Search, backfill, and request controlled discovery into the normalized, plugin-owned local business directory through the FileForge bridge.
   license:
     name: MIT
     identifier: MIT
@@ -28,6 +28,7 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
                 required: [businesses, total]
                 properties:
                   businesses:
@@ -61,6 +62,7 @@ paths:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
                 required: [business]
                 properties:
                   business: { $ref: "#/components/schemas/Business" }
@@ -96,6 +98,78 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+  /discover:
+    post:
+      operationId: requestDiscovery
+      summary: Queue an idempotent automated business-discovery sweep
+      description: Uses the directory's administrator-configured provider and the same worker, pacing, retries, and network controls as manual discovery. The caller cannot choose an outbound endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DiscoveryRequest" }
+      responses:
+        "202":
+          description: Discovery queued, or a matching request was deduplicated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job, deduplicated]
+                properties:
+                  job: { $ref: "#/components/schemas/DiscoveryJobSummary" }
+                  deduplicated: { type: boolean }
+        "409":
+          description: The request ID conflicts with an earlier payload, or this caller already has an active automated job
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Invalid request, unsupported group, excessive step count, or body larger than 64 KiB
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Discovery storage is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /discovery-status:
+    post:
+      operationId: getDiscoveryStatus
+      summary: Read the status of an automated discovery request created by the caller
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DiscoveryStatusRequest" }
+      responses:
+        "200":
+          description: Current discovery status with a bounded error code
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [job]
+                properties:
+                  job: { $ref: "#/components/schemas/DiscoveryJobSummary" }
+        "404":
+          description: No matching request owned by the calling plugin
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Invalid status request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Discovery status is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 components:
   securitySchemes:
     hubServiceToken:
@@ -105,10 +179,12 @@ components:
   schemas:
     Error:
       type: object
+      additionalProperties: false
       required: [error]
       properties:
         error:
           type: object
+          additionalProperties: false
           required: [code, message]
           properties:
             code: { type: string }
@@ -125,8 +201,61 @@ components:
         city: { type: string, maxLength: 120 }
         region: { type: string, maxLength: 120 }
         country: { type: string, maxLength: 120 }
+        discoveryJobId: { type: string, maxLength: 128 }
         limit: { type: integer, minimum: 1, maximum: 1000, default: 100 }
         cursor: { type: string }
+    DiscoveryRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, name, areas, groups]
+      properties:
+        requestId: { type: string, minLength: 16, maxLength: 128 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        areas:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            additionalProperties: false
+            required: [label, latitude, longitude, radiusMeters]
+            properties:
+              label: { type: string, minLength: 1, maxLength: 120 }
+              latitude: { type: number, minimum: -90, maximum: 90 }
+              longitude: { type: number, minimum: -180, maximum: 180 }
+              radiusMeters: { type: integer, minimum: 250, maximum: 25000 }
+        groups:
+          type: array
+          minItems: 1
+          maxItems: 7
+          uniqueItems: true
+          items: { enum: [shop, craft, office, amenity, tourism, healthcare, leisure] }
+    DiscoveryStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId]
+      properties:
+        requestId: { type: string, minLength: 16, maxLength: 128 }
+    DiscoveryJobSummary:
+      type: object
+      additionalProperties: false
+      required: [id, requestId, status, totalSteps, createdAt]
+      properties:
+        id: { type: string, minLength: 16, maxLength: 128 }
+        requestId: { type: string, minLength: 16, maxLength: 128 }
+        status: { enum: [queued, running, completed, failed, canceled] }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        totalSteps: { type: integer, minimum: 1, maximum: 350 }
+        completedSteps: { type: integer, minimum: 0, maximum: 350 }
+        recordsSeen: { type: integer, minimum: 0 }
+        recordsCreated: { type: integer, minimum: 0 }
+        recordsUpdated: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        errorCode:
+          type: string
+          enum: ["", provider_unavailable, provider_rate_limited, provider_invalid_response, discovery_canceled, internal_error]
     Business:
       type: object
       additionalProperties: false

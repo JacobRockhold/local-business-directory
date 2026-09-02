@@ -35,12 +35,32 @@ CREATE TABLE IF NOT EXISTS discovery_jobs (
   records_created integer NOT NULL DEFAULT 0,
   records_updated integer NOT NULL DEFAULT 0,
   last_error text NOT NULL DEFAULT '',
+  error_code text NOT NULL DEFAULT '',
+  request_id text NOT NULL DEFAULT '',
+  automated_caller_plugin text NOT NULL DEFAULT '',
   created_by text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
   started_at timestamptz,
   completed_at timestamptz
 );
+ALTER TABLE discovery_jobs ADD COLUMN IF NOT EXISTS error_code text NOT NULL DEFAULT '';
+ALTER TABLE discovery_jobs ADD COLUMN IF NOT EXISTS request_id text NOT NULL DEFAULT '';
+ALTER TABLE discovery_jobs ADD COLUMN IF NOT EXISTS automated_caller_plugin text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS discovery_jobs_status_created_idx ON discovery_jobs (status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS discovery_jobs_one_active_automatic_per_caller_idx
+  ON discovery_jobs (automated_caller_plugin)
+  WHERE automated_caller_plugin <> '' AND status IN ('queued','running');
+
+CREATE TABLE IF NOT EXISTS discovery_requests (
+  caller_plugin text NOT NULL,
+  request_id text NOT NULL,
+  payload_hash text NOT NULL,
+  job_id text NOT NULL REFERENCES discovery_jobs(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (caller_plugin, request_id),
+  UNIQUE (job_id)
+);
+CREATE INDEX IF NOT EXISTS discovery_requests_created_idx ON discovery_requests (created_at);
 
 CREATE TABLE IF NOT EXISTS businesses (
   id text PRIMARY KEY,
@@ -89,7 +109,7 @@ func migrateDatabase(ctx context.Context, databaseURL string) error {
 	if _, err := conn.Exec(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
-	_, err = conn.Exec(ctx, `UPDATE discovery_jobs SET status='queued', last_error='Resumed after plugin restart.', started_at=NULL WHERE status='running'`)
+	_, err = conn.Exec(ctx, `UPDATE discovery_jobs SET status='queued', last_error='Resumed after plugin restart.', error_code='', started_at=NULL WHERE status='running'`)
 	return err
 }
 
@@ -135,8 +155,55 @@ func saveSettings(ctx context.Context, pool *pgxpool.Pool, value DirectorySettin
 func createJob(ctx context.Context, pool *pgxpool.Pool, job DiscoveryJob) error {
 	areas, _ := json.Marshal(job.Areas)
 	groups, _ := json.Marshal(job.Groups)
-	_, err := pool.Exec(ctx, `INSERT INTO discovery_jobs (id,name,status,areas,groups,total_steps,created_by,created_at) VALUES ($1,$2,'queued',$3,$4,$5,$6,$7)`, job.ID, job.Name, areas, groups, job.TotalSteps, job.CreatedBy, job.CreatedAt)
+	_, err := pool.Exec(ctx, `INSERT INTO discovery_jobs (id,name,status,areas,groups,total_steps,request_id,automated_caller_plugin,created_by,created_at) VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9)`, job.ID, job.Name, areas, groups, job.TotalSteps, job.RequestID, job.RequestedByPlugin, job.CreatedBy, job.CreatedAt)
 	return err
+}
+
+var (
+	errRequestConflict = errors.New("discovery request id was reused with a different payload")
+	errDiscoveryBusy   = errors.New("another automated discovery job is active for this caller")
+)
+
+func createAutomatedJob(ctx context.Context, pool *pgxpool.Pool, job DiscoveryJob, payloadHash string) (DiscoveryJob, bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return DiscoveryJob{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, job.RequestedByPlugin); err != nil {
+		return DiscoveryJob{}, false, err
+	}
+	var existingHash, existingJobID string
+	err = tx.QueryRow(ctx, `SELECT payload_hash,job_id FROM discovery_requests WHERE caller_plugin=$1 AND request_id=$2`, job.RequestedByPlugin, job.RequestID).Scan(&existingHash, &existingJobID)
+	if err == nil {
+		if existingHash != payloadHash {
+			return DiscoveryJob{}, false, errRequestConflict
+		}
+		existing, getErr := scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM discovery_jobs WHERE id=$1`, existingJobID))
+		if getErr != nil {
+			return DiscoveryJob{}, false, getErr
+		}
+		return existing, true, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return DiscoveryJob{}, false, err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM discovery_jobs WHERE automated_caller_plugin=$1 AND status IN ('queued','running'))`, job.RequestedByPlugin).Scan(&active); err != nil {
+		return DiscoveryJob{}, false, err
+	}
+	if active {
+		return DiscoveryJob{}, false, errDiscoveryBusy
+	}
+	areas, _ := json.Marshal(job.Areas)
+	groups, _ := json.Marshal(job.Groups)
+	if _, err := tx.Exec(ctx, `INSERT INTO discovery_jobs (id,name,status,areas,groups,total_steps,request_id,automated_caller_plugin,created_by,created_at) VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9)`, job.ID, job.Name, areas, groups, job.TotalSteps, job.RequestID, job.RequestedByPlugin, job.CreatedBy, job.CreatedAt); err != nil {
+		return DiscoveryJob{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO discovery_requests (caller_plugin,request_id,payload_hash,job_id,created_at) VALUES ($1,$2,$3,$4,$5)`, job.RequestedByPlugin, job.RequestID, payloadHash, job.ID, job.CreatedAt); err != nil {
+		return DiscoveryJob{}, false, err
+	}
+	return job, false, tx.Commit(ctx)
 }
 
 func claimJob(ctx context.Context, pool *pgxpool.Pool) (DiscoveryJob, error) {
@@ -146,11 +213,11 @@ func claimJob(ctx context.Context, pool *pgxpool.Pool) (DiscoveryJob, error) {
 	}
 	defer tx.Rollback(ctx)
 	row := tx.QueryRow(ctx, `
-SELECT id,name,areas,groups,total_steps,completed_steps,records_seen,records_created,records_updated,last_error,created_by,created_at
+SELECT id,name,areas,groups,total_steps,completed_steps,records_seen,records_created,records_updated,last_error,error_code,request_id,automated_caller_plugin,created_by,created_at
 FROM discovery_jobs WHERE status='queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`)
 	var job DiscoveryJob
 	var areas, groups []byte
-	if err := row.Scan(&job.ID, &job.Name, &areas, &groups, &job.TotalSteps, &job.CompletedSteps, &job.RecordsSeen, &job.RecordsCreated, &job.RecordsUpdated, &job.LastError, &job.CreatedBy, &job.CreatedAt); err != nil {
+	if err := row.Scan(&job.ID, &job.Name, &areas, &groups, &job.TotalSteps, &job.CompletedSteps, &job.RecordsSeen, &job.RecordsCreated, &job.RecordsUpdated, &job.LastError, &job.ErrorCode, &job.RequestID, &job.RequestedByPlugin, &job.CreatedBy, &job.CreatedAt); err != nil {
 		return DiscoveryJob{}, err
 	}
 	if err := json.Unmarshal(areas, &job.Areas); err != nil {
@@ -176,18 +243,18 @@ func updateJobStep(ctx context.Context, pool *pgxpool.Pool, jobID string, seen, 
 	return err
 }
 
-func finishJob(ctx context.Context, pool *pgxpool.Pool, jobID, status, message string) error {
-	_, err := pool.Exec(ctx, `UPDATE discovery_jobs SET status=$2,last_error=$3,completed_at=now() WHERE id=$1`, jobID, status, message)
+func finishJob(ctx context.Context, pool *pgxpool.Pool, jobID, status, errorCode, message string) error {
+	_, err := pool.Exec(ctx, `UPDATE discovery_jobs SET status=$2,error_code=$3,last_error=$4,completed_at=now() WHERE id=$1`, jobID, status, errorCode, message)
 	return err
 }
 
 func cancelJob(ctx context.Context, pool *pgxpool.Pool, jobID string) (bool, error) {
-	result, err := pool.Exec(ctx, `UPDATE discovery_jobs SET status='canceled',completed_at=now(),last_error='Canceled by user.' WHERE id=$1 AND status IN ('queued','running')`, jobID)
+	result, err := pool.Exec(ctx, `UPDATE discovery_jobs SET status='canceled',completed_at=now(),error_code='discovery_canceled',last_error='Canceled by user.' WHERE id=$1 AND status IN ('queued','running')`, jobID)
 	return result.RowsAffected() == 1, err
 }
 
 func retryJob(ctx context.Context, pool *pgxpool.Pool, jobID string) (bool, error) {
-	result, err := pool.Exec(ctx, `UPDATE discovery_jobs SET status='queued',last_error='',started_at=NULL,completed_at=NULL WHERE id=$1 AND status='failed'`, jobID)
+	result, err := pool.Exec(ctx, `UPDATE discovery_jobs SET status='queued',last_error='',error_code='',started_at=NULL,completed_at=NULL WHERE id=$1 AND status='failed'`, jobID)
 	return result.RowsAffected() == 1, err
 }
 
@@ -199,7 +266,7 @@ func jobCanceled(ctx context.Context, pool *pgxpool.Pool, jobID string) bool {
 func scanJob(row pgx.Row) (DiscoveryJob, error) {
 	var job DiscoveryJob
 	var areas, groups []byte
-	err := row.Scan(&job.ID, &job.Name, &job.Status, &areas, &groups, &job.TotalSteps, &job.CompletedSteps, &job.RecordsSeen, &job.RecordsCreated, &job.RecordsUpdated, &job.LastError, &job.CreatedBy, &job.CreatedAt, &job.StartedAt, &job.CompletedAt)
+	err := row.Scan(&job.ID, &job.Name, &job.Status, &areas, &groups, &job.TotalSteps, &job.CompletedSteps, &job.RecordsSeen, &job.RecordsCreated, &job.RecordsUpdated, &job.LastError, &job.ErrorCode, &job.RequestID, &job.RequestedByPlugin, &job.CreatedBy, &job.CreatedAt, &job.StartedAt, &job.CompletedAt)
 	if err != nil {
 		return job, err
 	}
@@ -210,7 +277,7 @@ func scanJob(row pgx.Row) (DiscoveryJob, error) {
 	return job, err
 }
 
-const jobColumns = `id,name,status,areas,groups,total_steps,completed_steps,records_seen,records_created,records_updated,last_error,created_by,created_at,started_at,completed_at`
+const jobColumns = `id,name,status,areas,groups,total_steps,completed_steps,records_seen,records_created,records_updated,last_error,error_code,request_id,automated_caller_plugin,created_by,created_at,started_at,completed_at`
 
 func listJobs(ctx context.Context, pool *pgxpool.Pool, limit int) ([]DiscoveryJob, error) {
 	rows, err := pool.Query(ctx, `SELECT `+jobColumns+` FROM discovery_jobs ORDER BY created_at DESC LIMIT $1`, limit)
@@ -231,6 +298,18 @@ func listJobs(ctx context.Context, pool *pgxpool.Pool, limit int) ([]DiscoveryJo
 
 func getJob(ctx context.Context, pool *pgxpool.Pool, id string) (DiscoveryJob, error) {
 	return scanJob(pool.QueryRow(ctx, `SELECT `+jobColumns+` FROM discovery_jobs WHERE id=$1`, id))
+}
+
+func getAutomatedJob(ctx context.Context, pool *pgxpool.Pool, callerPlugin, requestID string) (DiscoveryJob, error) {
+	return scanJob(pool.QueryRow(ctx, `SELECT `+prefixedJobColumns("j")+` FROM discovery_jobs j JOIN discovery_requests r ON r.job_id=j.id WHERE r.caller_plugin=$1 AND r.request_id=$2`, callerPlugin, requestID))
+}
+
+func prefixedJobColumns(alias string) string {
+	parts := strings.Split(jobColumns, ",")
+	for index := range parts {
+		parts[index] = alias + "." + parts[index]
+	}
+	return strings.Join(parts, ",")
 }
 
 func upsertBusinesses(ctx context.Context, pool *pgxpool.Pool, jobID string, businesses []Business) (int, int, error) {

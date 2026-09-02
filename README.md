@@ -30,6 +30,8 @@ Operations:
 - `POST /search` — current filtered search with an opaque paging cursor.
 - `POST /get` — one current record by stable directory ID.
 - `POST /backfill` — stable snapshot pages of up to 1,000 records for downstream projections.
+- `POST /discover` — queue an idempotent automated sweep using the administrator-controlled data source.
+- `POST /discovery-status` — read a caller-owned automated request using bounded status codes.
 
 The complete contract is in `schemas/directory.v1.openapi.yaml`.
 
@@ -70,8 +72,8 @@ Clone the [Business Hub repository](https://github.com/JacobRockhold/business-hu
 
 ```powershell
 pnpm plugin:validate -- --source plugins/local-business-directory
-pnpm plugin:build -- --source plugins/local-business-directory --image local-business-directory:0.1.1
-pnpm plugin:test -- --source plugins/local-business-directory --image local-business-directory:0.1.1 --database-url <disposable-postgres-url>
+pnpm plugin:build -- --source plugins/local-business-directory --image local-business-directory:0.2.0
+pnpm plugin:test -- --source plugins/local-business-directory --image local-business-directory:0.2.0 --database-url <disposable-postgres-url>
 ```
 
 The database URL passed to `plugin:test` must be disposable and reachable from Docker. Follow the Business Hub [first-plugin guide](https://github.com/JacobRockhold/business-hub/blob/main/docs/plugins/FIRST_PLUGIN.md) to create a signing key, package the image digest, trust the publisher, and install the resulting `.hubpkg`.

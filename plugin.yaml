@@ -3,7 +3,7 @@ kind: Plugin
 metadata:
   id: com.businesshub.local-businesses
   name: Local Business Directory
-  version: 0.1.1
+  version: 0.2.0
   publisher: local-owner
   description: Discovers local businesses in broad geographic sweeps, deduplicates them, and provides a shared directory to approved FileForge applications.
 compatibility:
@@ -59,4 +59,4 @@ resources:
   cpuUnits: 500
   storageMiB: 2048
 data:
-  exportFormatVersion: 1
+  exportFormatVersion: 2

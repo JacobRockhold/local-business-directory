@@ -10,21 +10,24 @@ type Area struct {
 }
 
 type DiscoveryJob struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Status         string     `json:"status"`
-	Areas          []Area     `json:"areas"`
-	Groups         []string   `json:"groups"`
-	TotalSteps     int        `json:"totalSteps"`
-	CompletedSteps int        `json:"completedSteps"`
-	RecordsSeen    int        `json:"recordsSeen"`
-	RecordsCreated int        `json:"recordsCreated"`
-	RecordsUpdated int        `json:"recordsUpdated"`
-	LastError      string     `json:"lastError,omitempty"`
-	CreatedBy      string     `json:"createdBy,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	StartedAt      *time.Time `json:"startedAt,omitempty"`
-	CompletedAt    *time.Time `json:"completedAt,omitempty"`
+	ID                string     `json:"id"`
+	RequestID         string     `json:"requestId,omitempty"`
+	RequestedByPlugin string     `json:"requestedByPlugin,omitempty"`
+	Name              string     `json:"name"`
+	Status            string     `json:"status"`
+	Areas             []Area     `json:"areas"`
+	Groups            []string   `json:"groups"`
+	TotalSteps        int        `json:"totalSteps"`
+	CompletedSteps    int        `json:"completedSteps"`
+	RecordsSeen       int        `json:"recordsSeen"`
+	RecordsCreated    int        `json:"recordsCreated"`
+	RecordsUpdated    int        `json:"recordsUpdated"`
+	LastError         string     `json:"lastError,omitempty"`
+	ErrorCode         string     `json:"errorCode,omitempty"`
+	CreatedBy         string     `json:"createdBy,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	StartedAt         *time.Time `json:"startedAt,omitempty"`
+	CompletedAt       *time.Time `json:"completedAt,omitempty"`
 }
 
 type Business struct {
@@ -62,16 +65,36 @@ type DirectorySettings struct {
 }
 
 type SearchRequest struct {
-	Query      string   `json:"query"`
-	Categories []string `json:"categories"`
-	City       string   `json:"city"`
-	Region     string   `json:"region"`
-	Country    string   `json:"country"`
-	Limit      int      `json:"limit"`
-	Cursor     string   `json:"cursor"`
+	Query          string   `json:"query"`
+	Categories     []string `json:"categories"`
+	City           string   `json:"city"`
+	Region         string   `json:"region"`
+	Country        string   `json:"country"`
+	DiscoveryJobID string   `json:"discoveryJobId"`
+	Limit          int      `json:"limit"`
+	Cursor         string   `json:"cursor"`
 }
 
 type BackfillRequest struct {
 	Cursor string `json:"cursor"`
 	Limit  int    `json:"limit"`
+}
+
+type DiscoveryRequestInput struct {
+	RequestID string   `json:"requestId"`
+	Name      string   `json:"name"`
+	Areas     []Area   `json:"areas"`
+	Groups    []string `json:"groups"`
+}
+
+type DiscoveryStatusRequest struct {
+	RequestID string `json:"requestId"`
+}
+
+type DiscoveryRequestRecord struct {
+	CallerPlugin string    `json:"callerPlugin"`
+	RequestID    string    `json:"requestId"`
+	PayloadHash  string    `json:"payloadHash"`
+	JobID        string    `json:"jobId"`
+	CreatedAt    time.Time `json:"createdAt"`
 }

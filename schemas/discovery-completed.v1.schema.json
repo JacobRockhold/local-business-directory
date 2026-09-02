@@ -18,6 +18,8 @@
     "recordsSeen": { "type": "integer", "minimum": 0 },
     "recordsCreated": { "type": "integer", "minimum": 0 },
     "recordsUpdated": { "type": "integer", "minimum": 0 },
+    "requestId": { "type": "string", "minLength": 16, "maxLength": 128 },
+    "requestedByPlugin": { "type": "string", "minLength": 1, "maxLength": 200 },
     "completedAt": { "type": "string", "format": "date-time" }
   }
 }

@@ -36,6 +36,9 @@ func searchWhere(request SearchRequest) (string, []any) {
 	if value := strings.TrimSpace(request.Country); value != "" {
 		add(`country ILIKE $%d`, value)
 	}
+	if value := strings.TrimSpace(request.DiscoveryJobID); value != "" {
+		add(`discovery_job_id = $%d`, value)
+	}
 	return strings.Join(clauses, " AND "), arguments
 }
 

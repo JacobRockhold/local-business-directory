@@ -22,7 +22,7 @@ import (
 const pluginID = "com.businesshub.local-businesses"
 const pluginName = "Local Business Directory"
 
-var version = "0.1.1"
+var version = "0.2.0"
 
 type App struct {
 	pool *pgxpool.Pool
@@ -71,6 +71,8 @@ func main() {
 	mux.HandleFunc("POST /_hub/capabilities/com.businesshub.local-businesses.directory.v1/search", app.capabilitySearch)
 	mux.HandleFunc("POST /_hub/capabilities/com.businesshub.local-businesses.directory.v1/backfill", app.capabilityBackfill)
 	mux.HandleFunc("POST /_hub/capabilities/com.businesshub.local-businesses.directory.v1/get", app.capabilityGet)
+	mux.HandleFunc("POST /_hub/capabilities/com.businesshub.local-businesses.directory.v1/discover", app.capabilityDiscover)
+	mux.HandleFunc("POST /_hub/capabilities/com.businesshub.local-businesses.directory.v1/discovery-status", app.capabilityDiscoveryStatus)
 	mux.HandleFunc("GET /api/stats", app.stats)
 	mux.HandleFunc("GET /api/businesses", app.listBusinesses)
 	mux.HandleFunc("GET /api/businesses.csv", app.exportCSV)
@@ -130,7 +132,7 @@ func (app *App) deliverEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "delivery_invalid", err.Error())
 		return
 	}
-	// Version 0.1 declares no subscriptions. The endpoint remains available to
+	// This plugin declares no subscriptions. The endpoint remains available to
 	// satisfy Plugin API v1 and safely acknowledges accidental empty delivery.
 	w.WriteHeader(http.StatusAccepted)
 }

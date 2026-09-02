@@ -27,7 +27,7 @@ func exportData(ctx context.Context, databaseURL string, output io.Writer) error
 		return err
 	}
 	header := map[string]any{
-		"pluginId": pluginID, "pluginVersion": version, "exportFormatVersion": 1, "createdAt": time.Now().UTC(),
+		"pluginId": pluginID, "pluginVersion": version, "exportFormatVersion": 2, "createdAt": time.Now().UTC(),
 		"source": map[string]string{
 			"name": "OpenStreetMap", "attribution": "© OpenStreetMap contributors",
 			"license": "Open Data Commons Open Database License 1.0", "licenseUrl": "https://www.openstreetmap.org/copyright",
@@ -39,34 +39,100 @@ func exportData(ctx context.Context, databaseURL string, output io.Writer) error
 	if _, err := writer.Write(headerJSON[:len(headerJSON)-1]); err != nil {
 		return err
 	}
-	if _, err := writer.WriteString(`,"businesses":[`); err != nil {
+	encoder := json.NewEncoder(writer)
+	if _, err := writer.WriteString(`,"discoveryJobs":[`); err != nil {
+		return err
+	}
+	jobRows, err := pool.Query(ctx, `SELECT `+jobColumns+` FROM discovery_jobs ORDER BY created_at,id`)
+	if err != nil {
+		return err
+	}
+	first := true
+	for jobRows.Next() {
+		job, err := scanJob(jobRows)
+		if err != nil {
+			jobRows.Close()
+			return err
+		}
+		if !first {
+			if _, err := writer.WriteString(","); err != nil {
+				jobRows.Close()
+				return err
+			}
+		}
+		first = false
+		if err := encoder.Encode(job); err != nil {
+			jobRows.Close()
+			return err
+		}
+	}
+	if err := jobRows.Err(); err != nil {
+		jobRows.Close()
+		return err
+	}
+	jobRows.Close()
+	if _, err := writer.WriteString(`],"discoveryRequests":[`); err != nil {
+		return err
+	}
+	requestRows, err := pool.Query(ctx, `SELECT caller_plugin,request_id,payload_hash,job_id,created_at FROM discovery_requests ORDER BY created_at,caller_plugin,request_id`)
+	if err != nil {
+		return err
+	}
+	first = true
+	for requestRows.Next() {
+		var request DiscoveryRequestRecord
+		if err := requestRows.Scan(&request.CallerPlugin, &request.RequestID, &request.PayloadHash, &request.JobID, &request.CreatedAt); err != nil {
+			requestRows.Close()
+			return err
+		}
+		if !first {
+			if _, err := writer.WriteString(","); err != nil {
+				requestRows.Close()
+				return err
+			}
+		}
+		first = false
+		if err := encoder.Encode(request); err != nil {
+			requestRows.Close()
+			return err
+		}
+	}
+	if err := requestRows.Err(); err != nil {
+		requestRows.Close()
+		return err
+	}
+	requestRows.Close()
+	if _, err := writer.WriteString(`],"businesses":[`); err != nil {
 		return err
 	}
 	rows, err := pool.Query(ctx, `SELECT `+businessColumns+` FROM businesses ORDER BY id`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	encoder := json.NewEncoder(writer)
-	first := true
+	first = true
 	for rows.Next() {
 		business, err := scanBusiness(rows)
 		if err != nil {
+			rows.Close()
 			return err
 		}
 		if !first {
 			if _, err := writer.WriteString(","); err != nil {
+				rows.Close()
 				return err
 			}
 		}
 		first = false
 		if err := encoder.Encode(business); err != nil {
+			rows.Close()
 			return err
 		}
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return err
 	}
+	rows.Close()
 	if _, err := writer.WriteString("]}\n"); err != nil {
 		return err
 	}
@@ -111,6 +177,51 @@ func importData(ctx context.Context, databaseURL string, input io.Reader) error 
 				return err
 			}
 			importedSettings = &value
+		case "discoveryJobs":
+			opening, err := decoder.Token()
+			if err != nil || opening != json.Delim('[') {
+				return errors.New("discoveryJobs must be an array")
+			}
+			for decoder.More() {
+				var job DiscoveryJob
+				if err := decoder.Decode(&job); err != nil {
+					return fmt.Errorf("decode discovery job: %w", err)
+				}
+				if err := validateImportedJob(job); err != nil {
+					return err
+				}
+				areas, _ := json.Marshal(job.Areas)
+				groups, _ := json.Marshal(job.Groups)
+				_, err := tx.Exec(ctx, `INSERT INTO discovery_jobs (`+jobColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,status=EXCLUDED.status,areas=EXCLUDED.areas,groups=EXCLUDED.groups,total_steps=EXCLUDED.total_steps,completed_steps=EXCLUDED.completed_steps,records_seen=EXCLUDED.records_seen,records_created=EXCLUDED.records_created,records_updated=EXCLUDED.records_updated,last_error=EXCLUDED.last_error,error_code=EXCLUDED.error_code,request_id=EXCLUDED.request_id,automated_caller_plugin=EXCLUDED.automated_caller_plugin,created_by=EXCLUDED.created_by,created_at=EXCLUDED.created_at,started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at`,
+					job.ID, job.Name, job.Status, areas, groups, job.TotalSteps, job.CompletedSteps, job.RecordsSeen, job.RecordsCreated, job.RecordsUpdated, job.LastError, job.ErrorCode, job.RequestID, job.RequestedByPlugin, job.CreatedBy, job.CreatedAt, job.StartedAt, job.CompletedAt)
+				if err != nil {
+					return err
+				}
+			}
+			if closing, err := decoder.Token(); err != nil || closing != json.Delim(']') {
+				return errors.New("discoveryJobs array is incomplete")
+			}
+		case "discoveryRequests":
+			opening, err := decoder.Token()
+			if err != nil || opening != json.Delim('[') {
+				return errors.New("discoveryRequests must be an array")
+			}
+			for decoder.More() {
+				var request DiscoveryRequestRecord
+				if err := decoder.Decode(&request); err != nil {
+					return fmt.Errorf("decode discovery request: %w", err)
+				}
+				if err := validateImportedDiscoveryRequest(request); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO discovery_requests (caller_plugin,request_id,payload_hash,job_id,created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (caller_plugin,request_id) DO UPDATE SET payload_hash=EXCLUDED.payload_hash,job_id=EXCLUDED.job_id,created_at=EXCLUDED.created_at`, request.CallerPlugin, request.RequestID, request.PayloadHash, request.JobID, request.CreatedAt); err != nil {
+					return err
+				}
+			}
+			if closing, err := decoder.Token(); err != nil || closing != json.Delim(']') {
+				return errors.New("discoveryRequests array is incomplete")
+			}
 		case "businesses":
 			opening, err := decoder.Token()
 			if err != nil || opening != json.Delim('[') {
@@ -158,7 +269,7 @@ ON CONFLICT (id) DO UPDATE SET source=EXCLUDED.source,source_type=EXCLUDED.sourc
 	if _, err := decoder.Token(); err != nil {
 		return err
 	}
-	if format != 1 {
+	if format != 1 && format != 2 {
 		return fmt.Errorf("unsupported export format version %d", format)
 	}
 	if importedSettings != nil {
@@ -175,6 +286,32 @@ ON CONFLICT (id) DO UPDATE SET source=EXCLUDED.source,source_type=EXCLUDED.sourc
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func validateImportedJob(job DiscoveryJob) error {
+	if strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.Name) == "" || job.CreatedAt.IsZero() {
+		return errors.New("import contains an invalid discovery job")
+	}
+	validStatus := map[string]bool{"queued": true, "running": true, "completed": true, "failed": true, "canceled": true}
+	if !validStatus[job.Status] || len(job.Areas) == 0 || len(job.Areas) > 50 || len(job.Groups) == 0 || job.TotalSteps != len(job.Areas)*len(job.Groups) {
+		return fmt.Errorf("import contains invalid discovery job %q", job.ID)
+	}
+	for _, area := range job.Areas {
+		if err := validateArea(area); err != nil {
+			return fmt.Errorf("import discovery job %q: %w", job.ID, err)
+		}
+	}
+	if _, err := validateGroups(job.Groups); err != nil {
+		return fmt.Errorf("import discovery job %q: %w", job.ID, err)
+	}
+	return nil
+}
+
+func validateImportedDiscoveryRequest(request DiscoveryRequestRecord) error {
+	if strings.TrimSpace(request.CallerPlugin) == "" || len(request.RequestID) < 16 || len(request.RequestID) > 128 || len(request.PayloadHash) != 64 || strings.TrimSpace(request.JobID) == "" || request.CreatedAt.IsZero() {
+		return errors.New("import contains an invalid discovery request")
+	}
+	return nil
 }
 
 func validateImportedBusiness(business Business) error {
