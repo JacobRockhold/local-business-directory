@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -99,6 +100,17 @@ func TestCompletionEventCorrelationFields(t *testing.T) {
 	manual := completionEventData(DiscoveryJob{ID: "job_manual_example", Name: "Manual", Areas: []Area{{}}, Groups: []string{"shop"}}, completedAt)
 	if _, exists := manual["requestId"]; exists {
 		t.Fatalf("manual event unexpectedly contains requestId: %#v", manual)
+	}
+}
+
+func TestDiscoveryErrorCodesAreBounded(t *testing.T) {
+	for _, code := range []string{"provider_unavailable", "provider_rate_limited", "provider_invalid_response"} {
+		if got := discoveryErrorCode(asProviderError(code, errors.New("provider detail"))); got != code {
+			t.Fatalf("expected %q, received %q", code, got)
+		}
+	}
+	if got := discoveryErrorCode(errors.New("database detail")); got != "internal_error" {
+		t.Fatalf("expected internal_error, received %q", got)
 	}
 }
 

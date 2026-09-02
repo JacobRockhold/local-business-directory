@@ -157,6 +157,46 @@ func TestDiscoveryJobFilter(t *testing.T) {
 	if err != nil || total != 1 || len(businesses) != 1 || businesses[0].DiscoveryJobID != "job_first" {
 		t.Fatalf("unexpected filtered search: total=%d businesses=%#v err=%v", total, businesses, err)
 	}
+	app := &App{pool: pool}
+	search := callCapability(t, app.capabilitySearch, SearchRequest{DiscoveryJobID: "job_first", Limit: 100}, "com.businesshub.crm")
+	if search.Code != http.StatusOK || !strings.Contains(search.Body.String(), `"total":1`) {
+		t.Fatalf("existing search capability regressed: %d %s", search.Code, search.Body.String())
+	}
+	get := callCapability(t, app.capabilityGet, map[string]string{"id": businesses[0].ID}, "com.businesshub.crm")
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), businesses[0].ID) {
+		t.Fatalf("existing get capability regressed: %d %s", get.Code, get.Body.String())
+	}
+	backfill := callCapability(t, app.capabilityBackfill, BackfillRequest{Limit: 100}, "com.businesshub.crm")
+	if backfill.Code != http.StatusOK || !strings.Contains(backfill.Body.String(), `"complete":true`) || !strings.Contains(backfill.Body.String(), businesses[0].ID) {
+		t.Fatalf("existing backfill capability regressed: %d %s", backfill.Code, backfill.Body.String())
+	}
+}
+
+func TestManualDiscoveryStillQueues(t *testing.T) {
+	_, pool := isolatedTestDatabase(t)
+	app := &App{pool: pool}
+	payload := map[string]any{
+		"name": "Manual sweep",
+		"areas": []Area{{Label: "Manual", Latitude: 38.7628, Longitude: -93.7361, RadiusMeters: 250}},
+		"groups": []string{"shop"},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/discovery-jobs", bytes.NewReader(body))
+	request.Header.Set("X-FileForge-User-ID", "usr_test")
+	request.Header.Set("X-CSRF-Token", "csrf-token")
+	request.AddCookie(&http.Cookie{Name: "hub_csrf", Value: "csrf-token"})
+	response := httptest.NewRecorder()
+	app.createDiscoveryJob(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("manual discovery regressed: %d %s", response.Code, response.Body.String())
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM discovery_jobs WHERE created_by='usr_test' AND request_id='' AND automated_caller_plugin=''`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("manual job was not stored independently: count=%d err=%v", count, err)
+	}
 }
 
 func TestExportImportRoundTripsDiscoveryRequests(t *testing.T) {
